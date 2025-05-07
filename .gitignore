@@ -172,4 +172,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-/conf/db.cnf
+/conf/config.yml

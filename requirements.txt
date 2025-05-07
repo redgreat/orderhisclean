@@ -1,3 +1,4 @@
 loguru
-mysql-replication
 pymysql
+schedule
+PyYAML

@@ -1,0 +1,67 @@
+# 定时任务配置
+scheduler:
+  # 每天开始执行的时间
+  start_time: "01:00"
+  # 处理器模块列表
+  handler_modules:
+    - "delete_handler"
+    - "migration_handler"
+
+# 数据库连接配置
+database:
+  # 源数据库配置
+  source:
+    host: "127.0.0.1"
+    port: 3306
+    database: "source_db"  # 可用逗号分隔多个数据库
+    tables: "order_history,other_table"  # 可用逗号分隔多个表
+    user: "root"
+    password: "password"
+    charset: "utf8"
+  
+  # 目标数据库配置
+  target:
+    host: "127.0.0.1"
+    port: 3306
+    database: "target_db"
+    user: "root"
+    password: "password"
+    charset: "utf8"
+
+# 处理器配置
+handlers:
+  # 删除处理器配置
+  delete_handler:
+    table: "order_history"
+    where_clause: "created_at < DATE_SUB(NOW(), INTERVAL 180 DAY)"
+    batch_size: 5000
+    cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
+  
+  # 数据迁移处理器配置
+  migration_handler:
+    source_table: "source_table_name"
+    target_table: "target_table_name"
+    where_clause: "status = 'COMPLETED' AND created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)"
+    batch_size: 3000
+    cut_off_time: "22:30:00"  # 每天截止时间，格式: HH:MM:SS
+
+# 日志配置
+logging:
+  # 日志目录（相对于项目根目录）
+  dir: "log"
+  # 日志文件名
+  filename: "batch_jobs.log"
+  # 日志级别
+  level: "INFO"
+  # 日志保留天数
+  retention: "7 days"
+  # 日志轮转策略
+  rotation: "1 days"
+  # 是否启用彩色输出
+  colorize: true
+  # 是否启用诊断信息
+  diagnose: true
+  # 是否启用回溯
+  backtrace: true
+  # 日志格式
+  format: "{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}"
