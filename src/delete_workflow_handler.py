@@ -52,7 +52,7 @@ class DeleteWorkflowHandler(BaseHandler):
     
     def _process_workflowruntimeitem(self) -> bool:
         # 查询需要处理的workflowruntimeitem记录
-        sql_select = f"SELECT Id FROM workflowruntimeitem WHERE Deleted=1 AND Status='ASSCPTED' AND CreatedAt<DATE_ADD(CURDATE(), INTERVAL -30 DAY) ORDER BY Id LIMIT {self.batch_size} FOR UPDATE;"
+        sql_select = f"SELECT Id FROM workflowruntimeitem WHERE Deleted=1 AND CreatedAt<DATE_ADD(CURDATE(), INTERVAL -30 DAY) ORDER BY Id LIMIT {self.batch_size};"
         processing_finished = True
         item_ids = []
         
@@ -117,8 +117,7 @@ class DeleteWorkflowHandler(BaseHandler):
                 sql_delete_steps = f"DELETE FROM workflowruntimesteps WHERE runtimeitemid IN ({placeholders_items});"
                 deleted_count_steps = cur.execute(sql_delete_steps, item_ids)
                 conn.commit()
-                logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")
-                
+                logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")          
 
     def _process_actors(self, step_ids) -> None:
         # 如果没有step_ids，则直接返回
