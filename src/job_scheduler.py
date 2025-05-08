@@ -51,7 +51,7 @@ def _run_handlers() -> None:
             cut_off_time_str = handler_config.get('cut_off_time', '23:00:00')
             cut_off_time = config.parse_time(cut_off_time_str)
             
-            if handler_cls.__name__ == "DeleteHandler":
+            if handler_cls.__name__ == "DeleteResourceHandler" or handler_cls.__name__ == "DeleteWorkflowHandler":
                 handler = handler_cls(
                     connection_kwargs=SOURCE_MYSQL_CONF,
                     batch_size=handler_config.get('batch_size', 100),

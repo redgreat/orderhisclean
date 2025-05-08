@@ -4,7 +4,8 @@ scheduler:
   start_time: "01:00"
   # 处理器模块列表
   handler_modules:
-    - "delete_handler"
+    - "delete_resource_handler"
+    - "delete_workflow_handler"
     - "migration_handler"
 
 # 数据库连接配置
@@ -31,12 +32,17 @@ database:
 # 处理器配置
 handlers:
   # 删除处理器配置
-  delete_handler:
+  delete_resource_handler:
     table: "order_history"
     where_clause: "created_at < DATE_SUB(NOW(), INTERVAL 180 DAY)"
     batch_size: 5000
     cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
   
+  # 工作流删除处理器配置
+  delete_workflow_handler:
+    batch_size: 100
+    cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
+
   # 数据迁移处理器配置
   migration_handler:
     source_table: "source_table_name"

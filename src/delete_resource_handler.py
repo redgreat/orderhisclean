@@ -1,4 +1,4 @@
-"""DeleteHandler – sample concrete handler performing DELETE from MySQL.
+"""DeleteResourceHandler – sample concrete handler performing DELETE from MySQL.
 
 This is an **example** implementation. Modify the SQL and connection details
 as needed.
@@ -11,7 +11,7 @@ from loguru import logger
 
 from base_handler import BaseHandler
 
-class DeleteHandler(BaseHandler):
+class DeleteResourceHandler(BaseHandler):
     """Periodically delete rows matching *where_clause* from *table*."""
 
     def __init__(
