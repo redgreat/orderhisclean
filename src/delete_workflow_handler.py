@@ -163,7 +163,8 @@ class DeleteWorkflowHandler(BaseHandler):
                     sql_select_steps = f"""
                         SELECT Id 
                         FROM workflowruntimesteps
-                        WHERE ItemId IN ({placeholders_old_item_ids})
+                        WHERE Status = 'ASSCPTED'
+                          AND ItemId IN ({placeholders_old_item_ids})
                     """
                     
                     with conn.cursor() as cur:
