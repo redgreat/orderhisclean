@@ -142,7 +142,7 @@ class DeleteWorkflowHandler(BaseHandler):
                 sql_select_old_items = """
                     SELECT i.Id 
                     FROM workflowruntimeitems i
-                    WHERE i.Status = 'ASSCPTED' 
+                    WHERE i.Status = 'ACCEPTED' 
                       AND i.CreatedAt < DATE_ADD(CURDATE(), INTERVAL -90 DAY)
                     ORDER BY i.Id
                     LIMIT %s
@@ -163,7 +163,7 @@ class DeleteWorkflowHandler(BaseHandler):
                     sql_select_steps = f"""
                         SELECT Id 
                         FROM workflowruntimesteps
-                        WHERE Status = 'ASSCPTED'
+                        WHERE Status = 'ACCEPTED'
                           AND ItemId IN ({placeholders_old_item_ids})
                     """
                     
