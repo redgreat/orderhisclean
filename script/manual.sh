@@ -1,0 +1,1 @@
+docker exec orderhisclean python src/job_scheduler.py --run-now

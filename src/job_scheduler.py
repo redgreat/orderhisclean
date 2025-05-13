@@ -3,15 +3,25 @@
 This script discovers handler classes and schedules them once per day at the
 configured *start time*. Each handler runs until completed or until its own
 cut-off time (defined inside handler).
+
+可以通过 --run-now 参数立即执行一次任务
 """
 from __future__ import annotations
 
 import importlib
 import inspect
 import time
+import os
+import sys
+import argparse
 
 import schedule
 from loguru import logger
+
+# 添加src目录到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
 
 # 导入配置和数据库配置（包含日志配置，会自动初始化日志）
 from config import config, SOURCE_MYSQL_CONF, TARGET_MYSQL_CONF
@@ -27,6 +37,9 @@ def _discover_handlers() -> list[type[BaseHandler]]:
     
     for module_name in handler_modules:
         try:
+            # 如果模块名不包含完整路径，添加src.前缀
+            if not module_name.startswith('src.'):
+                module_name = f'src.{module_name}'
             module = importlib.import_module(module_name)
         except ModuleNotFoundError as exc:
             logger.error(f"Cannot import handler module {module_name}: {exc}")
@@ -77,7 +90,17 @@ def _run_handlers() -> None:
 
 
 def main() -> None:
-    logger.info("Scheduler booting…")
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='任务调度器')
+    parser.add_argument('--run-now', action='store_true', help='立即执行一次任务，不进入调度模式')
+    args = parser.parse_args()
+
+    if args.run_now:
+        logger.info("手动触发模式：立即执行任务")
+        _run_handlers()
+        return
+
+    logger.info("调度器启动中...")
     # 从配置文件获取开始时间
     start_time = config.get_start_time()
     logger.info(f"调度器将在每天 {start_time} 开始运行任务")

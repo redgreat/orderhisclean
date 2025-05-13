@@ -2,7 +2,7 @@
 scheduler:
   # 每天开始执行的时间
   start_time: "01:00"
-  # 处理器模块列表
+  # 处理器模块列表 (不需要添加src.前缀，程序会自动处理)
   handler_modules:
     - "delete_resource_handler"
     - "delete_workflow_handler"
