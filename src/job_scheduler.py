@@ -37,12 +37,16 @@ def _discover_handlers() -> list[type[BaseHandler]]:
     
     for module_name in handler_modules:
         try:
-            # 如果模块名不包含完整路径，添加src.前缀
-            if not module_name.startswith('src.'):
-                module_name = f'src.{module_name}'
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError as exc:
-            logger.error(f"Cannot import handler module {module_name}: {exc}")
+            # 直接使用src.前缀导入模块
+            module_path = f"src.{module_name}"
+            try:
+                module = importlib.import_module(module_path)
+                logger.info(f"成功导入模块: {module_path}")
+            except ModuleNotFoundError as exc:
+                logger.error(f"无法导入模块: {module_path}: {exc}")
+                continue
+        except Exception as exc:
+            logger.error(f"导入模块时出错 {module_name}: {exc}")
             continue
         for name, obj in inspect.getmembers(module, inspect.isclass):
             if issubclass(obj, BaseHandler) and obj is not BaseHandler:
@@ -93,9 +97,12 @@ def main() -> None:
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='任务调度器')
     parser.add_argument('--run-now', action='store_true', help='立即执行一次任务，不进入调度模式')
+    
+    # 检查环境变量和命令行参数
     args = parser.parse_args()
-
-    if args.run_now:
+    run_now = args.run_now or os.environ.get('RUN_NOW', '').lower() in ('true', '1', 'yes')
+    
+    if run_now:
         logger.info("手动触发模式：立即执行任务")
         _run_handlers()
         return
