@@ -3,7 +3,8 @@ FROM python:3.12-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    PYTHONPATH=/app:/app/src
 
 # Create a non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser

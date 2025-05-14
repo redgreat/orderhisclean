@@ -23,6 +23,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
+parent_dir = os.path.dirname(current_dir)
+for path in [current_dir, parent_dir]:
+    if path not in sys.path:
+        sys.path.append(path)
+
 # 导入配置和数据库配置（包含日志配置，会自动初始化日志）
 from config import config, SOURCE_MYSQL_CONF, TARGET_MYSQL_CONF
 # 导入基础处理器
@@ -32,22 +37,25 @@ from base_handler import BaseHandler
 def _discover_handlers() -> list[type[BaseHandler]]:
     """Import modules and collect subclasses of *BaseHandler*."""
     handlers: list[type[BaseHandler]] = []
-    # 从配置文件获取处理器模块列表
     handler_modules = config.get_handler_modules()
     
     for module_name in handler_modules:
         try:
-            # 直接使用src.前缀导入模块
-            module_path = f"src.{module_name}"
             try:
-                module = importlib.import_module(module_path)
-                logger.info(f"成功导入模块: {module_path}")
-            except ModuleNotFoundError as exc:
-                logger.error(f"无法导入模块: {module_path}: {exc}")
-                continue
+                module = importlib.import_module(module_name)
+                logger.info(f"成功导入模块: {module_name}")
+            except ModuleNotFoundError:
+                try:
+                    module_path = f"src.{module_name}"
+                    module = importlib.import_module(module_path)
+                    logger.info(f"成功导入模块: {module_path}")
+                except ModuleNotFoundError as exc:
+                    logger.error(f"无法导入模块: {module_name} 或 src.{module_name}: {exc}")
+                    continue
         except Exception as exc:
             logger.error(f"导入模块时出错 {module_name}: {exc}")
             continue
+            
         for name, obj in inspect.getmembers(module, inspect.isclass):
             if issubclass(obj, BaseHandler) and obj is not BaseHandler:
                 handlers.append(obj)
