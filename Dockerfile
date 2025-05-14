@@ -3,13 +3,14 @@ FROM python:3.12-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai \
-    PYTHONPATH=/app:/app/src
+    TZ=Asia/Shanghai
 
 # Create a non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 WORKDIR /app
+
+ENV PYTHONPATH=/app:/app/src
 
 # Install dependencies first (for better caching)
 COPY requirements.txt .

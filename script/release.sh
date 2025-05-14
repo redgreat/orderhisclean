@@ -3,6 +3,7 @@
 git tag v0.0.1
 git push origin v0.0.1
 
+cd /opt/orderhisclean
 docker stop orderhisclean
 docker rm orderhisclean
 docker rmi registry.cn-hangzhou.aliyuncs.com/redgreat/orderhisclean
