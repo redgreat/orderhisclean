@@ -37,8 +37,8 @@ class DeleteWorkflowHandler(BaseHandler):
         processing_finished = True
         
         try:
-            # 先处理workflowruntimeitem表数据
-            processing_finished = self._process_workflowruntimeitem()
+            # 先处理workflowruntimeitems表数据
+            processing_finished = self._process_workflowruntimeitems()
             
             # 无论上述处理是否完成，都处理长期未完成的workflowruntimeitems数据
             self._clean_by_deleted_items()
@@ -49,21 +49,21 @@ class DeleteWorkflowHandler(BaseHandler):
             logger.error(f"处理过程中发生错误: {e}")
             # 发生错误时返回True，表示结束本轮处理
             return True
-    
-    def _process_workflowruntimeitem(self) -> bool:
-        # 查询需要处理的workflowruntimeitem记录
-        sql_select = f"SELECT Id FROM workflowruntimeitem WHERE Deleted=1 AND CreatedAt<DATE_ADD(CURDATE(), INTERVAL -30 DAY) ORDER BY Id LIMIT {self.batch_size};"
+
+    def _process_workflowruntimeitems(self) -> bool:
+        # 查询需要处理的workflowruntimeitems记录
+        sql_select = f"SELECT Id FROM workflowruntimeitems WHERE Deleted=1 AND CreatedAt<DATE_ADD(CURDATE(), INTERVAL -30 DAY) ORDER BY Id LIMIT {self.batch_size};"
         processing_finished = True
         item_ids = []
         
-        # 处理workflowruntimeitem表数据
+        # 处理workflowruntimeitems表数据
         with self._get_connection() as conn:
             try:
                 with conn.cursor() as cur:
                     cur.execute(sql_select)
                     rows = cur.fetchall()
                     if not rows:
-                        logger.info("今日没有更多workflowruntimeitem记录需要删除")
+                        logger.info("今日没有更多workflowruntimeitems记录需要删除")
                     else:
                         # 有记录需要处理，标记为未完成
                         processing_finished = False
@@ -73,26 +73,26 @@ class DeleteWorkflowHandler(BaseHandler):
                         # 批量处理steps和actors
                         self._process_steps(item_ids)
 
-                        # 删除workflowruntimeitem记录
+                        # 删除workflowruntimeitems记录
                         placeholders_ids = ",".join(["%s"] * len(item_ids))
-                        sql_delete_items = f"DELETE FROM workflowruntimeitem WHERE Id IN ({placeholders_ids});"
+                        sql_delete_items = f"DELETE FROM workflowruntimeitems WHERE Id IN ({placeholders_ids});"
                         deleted_count_items = cur.execute(sql_delete_items, item_ids)
                         conn.commit()
-                        logger.info(f"已从workflowruntimeitem删除{deleted_count_items}条记录")
-                        
+                        logger.info(f"已从workflowruntimeitems删除{deleted_count_items}条记录")
+
                         # 每处理完一批后等待30秒，减轻数据库负载
                         logger.info("批处理完成，等待30秒开始下一批...")
                         time.sleep(30)
             except Exception as e:
                 conn.rollback()
-                logger.error(f"处理workflowruntimeitem表数据时发生错误: {e}")
+                logger.error(f"处理workflowruntimeitems表数据时发生错误: {e}")
                 raise   
         return processing_finished
 
     def _process_steps(self, item_ids) -> None:
         # 如果没有item_ids，则直接返回
         if not item_ids:
-            logger.info("没有workflowruntimeitem记录需要处理")
+            logger.info("没有workflowruntimeitems记录需要处理")
             return
             
         # 使用IN查询批量获取所有相关的steps
