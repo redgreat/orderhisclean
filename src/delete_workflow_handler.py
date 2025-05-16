@@ -116,7 +116,9 @@ class DeleteWorkflowHandler(BaseHandler):
 
                     # 批量删除steps
                     sql_delete_steps = f"DELETE FROM workflowruntimesteps WHERE RuntimeItemId IN ({placeholders_items});"
+                    cur.execute("SET FOREIGN_KEY_CHECKS = 0;")
                     deleted_count_steps = cur.execute(sql_delete_steps, item_ids)
+                    cur.execute("SET FOREIGN_KEY_CHECKS = 1;")
                     conn.commit()
                     logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")          
             except Exception as e:
