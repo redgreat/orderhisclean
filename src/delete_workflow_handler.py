@@ -85,7 +85,7 @@ class DeleteWorkflowHandler(BaseHandler):
                         time.sleep(30)
             except Exception as e:
                 conn.rollback()
-                logger.error(f"处理workflowruntimeitems表数据时发生错误: {e}")
+                logger.error(f"处理workflowruntimeitems表数据时发生错误: {e}, 处理数据：{placeholders_ids}")
                 raise   
         return processing_finished
 
@@ -97,28 +97,32 @@ class DeleteWorkflowHandler(BaseHandler):
             
         # 使用IN查询批量获取所有相关的steps
         placeholders_items = ",".join(["%s"] * len(item_ids))
-        sql_select_steps = f"SELECT Id FROM workflowruntimesteps WHERE runtimeitemid IN ({placeholders_items});"
+        sql_select_steps = f"SELECT Id FROM workflowruntimesteps WHERE RuntimeItemId IN ({placeholders_items});"
         
         step_ids = []
         with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                # 查询所有相关的steps
-                cur.execute(sql_select_steps, item_ids)
-                rows_steps = cur.fetchall()
-                
-                if not rows_steps:
-                    logger.info("没有相关的workflowruntimesteps记录需要删除")
-                else:
-                    # 收集所有step_id并批量处理actors
-                    step_ids = [row["Id"] for row in rows_steps]
-                    self._process_actors(step_ids)
-                    
-                # 批量删除steps
-                sql_delete_steps = f"DELETE FROM workflowruntimesteps WHERE runtimeitemid IN ({placeholders_items});"
-                deleted_count_steps = cur.execute(sql_delete_steps, item_ids)
-                conn.commit()
-                logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")          
+            try:
+                with conn.cursor() as cur:
+                    # 查询所有相关的steps
+                    cur.execute(sql_select_steps, item_ids)
+                    rows_steps = cur.fetchall()
 
+                    if not rows_steps:
+                        logger.info("没有相关的workflowruntimesteps记录需要删除")
+                    else:
+                        # 收集所有step_id并批量处理actors
+                        step_ids = [row["Id"] for row in rows_steps]
+                        self._process_actors(step_ids)
+
+                    # 批量删除steps
+                    sql_delete_steps = f"DELETE FROM workflowruntimesteps WHERE RuntimeItemId IN ({placeholders_items});"
+                    deleted_count_steps = cur.execute(sql_delete_steps, item_ids)
+                    conn.commit()
+                    logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")          
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"处理workflowruntimesteps表数据时发生错误: {e}, 处理数据：{step_ids}")
+                raise   
     def _process_actors(self, step_ids) -> None:
         # 如果没有step_ids，则直接返回
         if not step_ids:
@@ -127,14 +131,19 @@ class DeleteWorkflowHandler(BaseHandler):
             
         # 使用IN查询批量删除所有相关的actors
         placeholders_steps = ",".join(["%s"] * len(step_ids))
-        delete_actors = f"DELETE FROM workflowruntimeactors WHERE runtimestepid IN ({placeholders_steps});"
+        delete_actors = f"DELETE FROM workflowruntimeactors WHERE RuntimeStepId IN ({placeholders_steps});"
         
         with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                deleted_count = cur.execute(delete_actors, step_ids)
-                conn.commit()
-                logger.info(f"已从workflowruntimeactors删除{deleted_count}条记录")
-                        
+            try:
+                with conn.cursor() as cur:
+                    deleted_count = cur.execute(delete_actors, step_ids)
+                    conn.commit()
+                    logger.info(f"已从workflowruntimeactors删除{deleted_count}条记录")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"处理workflowruntimeactors表数据时发生错误: {e}, 处理数据：{step_ids}")
+                raise
+
     def _clean_by_deleted_items(self) -> None:       
         with self._get_connection() as conn:
             try:
@@ -175,7 +184,7 @@ class DeleteWorkflowHandler(BaseHandler):
                     if step_ids:
                         # 然后基于步骤Id删除actors记录
                         placeholders_step_ids = ",".join(["%s"] * len(step_ids))
-                        sql_delete_actors = f"DELETE FROM workflowruntimeactors WHERE runtimestepid IN ({placeholders_step_ids}) AND Status='PROCESSING'"
+                        sql_delete_actors = f"DELETE FROM workflowruntimeactors WHERE RuntimeStepId IN ({placeholders_step_ids}) AND Status='PROCESSING'"
                         
                         with conn.cursor() as cur:
                             deleted_actors_count = cur.execute(sql_delete_actors, step_ids)
