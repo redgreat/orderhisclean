@@ -175,7 +175,7 @@ class DeleteWorkflowHandler(BaseHandler):
                         SELECT Id 
                         FROM workflowruntimesteps
                         WHERE Status = 'ACCEPTED'
-                          AND ItemId IN ({placeholders_old_item_ids})
+                          AND RuntimeItemId IN ({placeholders_old_item_ids})
                     """
                     
                     with conn.cursor() as cur:
