@@ -165,9 +165,9 @@ class DeleteWorkflowHandler(BaseHandler):
                     old_item_ids = [row["Id"] for row in old_item_rows]
                 
                 if not old_item_ids:
-                    logger.info("未找到90天前未完成的workflowruntimeitems记录")
+                    logger.info("未找到90天前已完成的workflowruntimeitems记录")
                 else:
-                    logger.info(f"找到{len(old_item_ids)}条90天前未完成的workflowruntimeitems记录")
+                    logger.info(f"找到{len(old_item_ids)}条90天前已完成的workflowruntimeitems记录")
                     
                     # 先查询workflowruntimesteps获取所有相关的stepId
                     placeholders_old_item_ids = ",".join(["%s"] * len(old_item_ids))
@@ -186,12 +186,12 @@ class DeleteWorkflowHandler(BaseHandler):
                     if step_ids:
                         # 然后基于步骤Id删除actors记录
                         placeholders_step_ids = ",".join(["%s"] * len(step_ids))
-                        sql_delete_actors = f"DELETE FROM workflowruntimeactors WHERE RuntimeStepId IN ({placeholders_step_ids}) AND Status='PROCESSING'"
+                        sql_delete_actors = f"DELETE FROM workflowruntimeactors WHERE RuntimeStepId IN ({placeholders_step_ids}) AND Active = 1 AND Status='PROCESSING'"
                         
                         with conn.cursor() as cur:
                             deleted_actors_count = cur.execute(sql_delete_actors, step_ids)
                         
-                        logger.info(f"已删除{deleted_actors_count}条90天前未完成工作流相关的actors记录")
+                        logger.info(f"已删除{deleted_actors_count}条90天前已完成工作流相关的actors记录")
                         
                         # 每处理完一批后等待30秒，减轻数据库负载
                         logger.info("长期未完成数据批处理完成，等待30秒开始下一批...")
