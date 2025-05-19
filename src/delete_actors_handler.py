@@ -46,12 +46,22 @@ class DeleteActorsHandler(BaseHandler):
         with self._get_connection() as conn:
             try:
                 sql_items = """
-                    SELECT i.Id 
-                    FROM workflowruntimeitems i
-                    WHERE i.Status = 'ACCEPTED' 
-                      AND i.CreatedAt < DATE_ADD(CURDATE(), INTERVAL -90 DAY)
-                    ORDER BY i.Id
-                    LIMIT %s
+                SELECT i.Id 
+                FROM workflowruntimeitems i
+                WHERE i.Status = 'ACCEPTED' 
+                  AND i.CreatedAt < DATE_ADD(CURDATE(), INTERVAL -90 DAY)
+                  AND EXISTS(SELECT 1
+				    FROM workflowruntimesteps s
+				    JOIN workflowruntimeactors a
+				      ON a.RuntimeStepId=s.Id
+				      AND a.Status='PROCESSING'
+				      AND a.Active=1
+				      AND a.Deleted=0
+				    WHERE s.RuntimeItemId=i.Id
+				      AND s.Status='ACCEPTED'
+				      AND s.Deleted=0)
+                ORDER BY i.Id
+                LIMIT %s
                 """
                 
                 with conn.cursor() as cur:
