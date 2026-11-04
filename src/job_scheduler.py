@@ -76,10 +76,23 @@ def _run_handlers() -> None:
             cut_off_time_str = handler_config.get('cut_off_time', '23:00:00')
             cut_off_time = config.parse_time(cut_off_time_str)
             
+            if not handler_config.get('enabled', True):
+                logger.info(f"{handler_cls.__name__} 已在配置中禁用，跳过")
+                continue
+
             if handler_cls.__name__ == "DeleteResourceHandler" or handler_cls.__name__ == "DeleteWorkflowHandler" or handler_cls.__name__ == "DeleteActorsHandler":
                 handler = handler_cls(
                     connection_kwargs=SOURCE_MYSQL_CONF,
                     batch_size=handler_config.get('batch_size', 100),
+                    cut_off_time=cut_off_time
+                )
+            elif handler_cls.__name__ == "WorkflowCompleteMigrationHandler":
+                handler = handler_cls(
+                    connection_kwargs=SOURCE_MYSQL_CONF,
+                    years=handler_config.get('years', []),
+                    batch_size=handler_config.get('batch_size', 50),
+                    pause_seconds=handler_config.get('pause_seconds', 30),
+                    workers=handler_config.get('workers', 1),
                     cut_off_time=cut_off_time
                 )
             # elif handler_cls.__name__ == "MigrationHandler":

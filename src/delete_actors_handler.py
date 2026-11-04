@@ -33,7 +33,6 @@ class DeleteActorsHandler(BaseHandler):
         try:
             processing_finished = self._clean_complete_actors()
 
-            logger.info("本次批处理全部完成")
             return processing_finished
         except Exception as e:
             logger.error(f"处理过程中发生错误: {e}")
