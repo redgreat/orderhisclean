@@ -40,7 +40,11 @@ handlers:
     cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
   
   # 工作流删除处理器配置
+  # 按 tb_workorderinfo.CreatedAt 区间 [start_date, end_date) 删除关联的 workflowruntime* 数据
+  # 仅处理 tb_workorderinfo.ServiceProviderCode <> '1002' 的工单
   delete_workflow_handler:
+    start_date: "2022-01-01"  # 区间起始日期（含），格式: YYYY-MM-DD
+    end_date: "2023-01-01"    # 区间结束日期（不含），格式: YYYY-MM-DD
     batch_size: 100
     cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
 

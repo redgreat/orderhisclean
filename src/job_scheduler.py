@@ -14,6 +14,7 @@ import time
 import os
 import sys
 import argparse
+import datetime
 
 import schedule
 from loguru import logger
@@ -80,9 +81,21 @@ def _run_handlers() -> None:
                 logger.info(f"{handler_cls.__name__} 已在配置中禁用，跳过")
                 continue
 
-            if handler_cls.__name__ == "DeleteResourceHandler" or handler_cls.__name__ == "DeleteWorkflowHandler" or handler_cls.__name__ == "DeleteActorsHandler":
+            if handler_cls.__name__ == "DeleteResourceHandler" or handler_cls.__name__ == "DeleteActorsHandler":
                 handler = handler_cls(
                     connection_kwargs=SOURCE_MYSQL_CONF,
+                    batch_size=handler_config.get('batch_size', 100),
+                    cut_off_time=cut_off_time
+                )
+            elif handler_cls.__name__ == "DeleteWorkflowHandler":
+                start_date_str = handler_config.get('start_date')
+                end_date_str = handler_config.get('end_date')
+                start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d') if start_date_str else None
+                end_date = datetime.datetime.strptime(end_date_str, '%Y-%m-%d') if end_date_str else None
+                handler = handler_cls(
+                    connection_kwargs=SOURCE_MYSQL_CONF,
+                    start_date=start_date,
+                    end_date=end_date,
                     batch_size=handler_config.get('batch_size', 100),
                     cut_off_time=cut_off_time
                 )

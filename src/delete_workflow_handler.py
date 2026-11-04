@@ -1,30 +1,39 @@
-"""DeleteWorkflowHandler – handler performing workflow-related DELETE operations from MySQL.
+"""DeleteWorkflowHandler – 按工单主单创建时间区间删除工作流运行时数据
 
-This is a skeleton implementation with placeholder logic. 
-The internal processing logic will be implemented by the user.
+数据范围:
+    tb_workorderinfo.CreatedAt 落在 [start_date, end_date) 区间内
+    -> workflowruntimeitems.TargetEntityId = tb_workorderinfo.Id
+    -> 级联删除 workflowruntimesteps / workflowruntimeactors
+    仅处理 tb_workorderinfo.ServiceProviderCode <> '1002' 的工单
 """
 from __future__ import annotations
 
 import datetime
 import time
+
 import pymysql
 from loguru import logger
 
 from base_handler import BaseHandler
 
+
 class DeleteWorkflowHandler(BaseHandler):
     def __init__(
         self,
         connection_kwargs: dict,
+        start_date: datetime.datetime | None = None,
+        end_date: datetime.datetime | None = None,
         batch_size: int = 100,
         cut_off_time: datetime.time | None = None,
     ) -> None:
         if cut_off_time is None:
-            # Default: stop at 23:00
+            # 默认截止时间：23:00
             cut_off_time = datetime.time(hour=23, minute=0, second=0)
         super().__init__(cut_off_time)
 
         self.conn_kwargs = connection_kwargs
+        self.start_date = start_date
+        self.end_date = end_date
         self.batch_size = batch_size
 
     # --------------------------------------------------------
@@ -33,41 +42,46 @@ class DeleteWorkflowHandler(BaseHandler):
     def _get_connection(self):
         return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **self.conn_kwargs)
 
-
     def _process_once(self) -> bool:
-        processing_finished = True
-        
+        if not self.start_date or not self.end_date:
+            logger.warning("DeleteWorkflowHandler 未配置 start_date/end_date，跳过本次任务")
+            return True
+
         try:
-            # 先处理workflowruntimeitems表数据
-            processing_finished = self._process_items()
-            
-            logger.info("本次批处理全部完成")
-            return processing_finished
+            return self._process_items()
         except Exception as e:
             logger.error(f"处理过程中发生错误: {e}")
             # 发生错误时返回True，表示结束本轮处理
             return True
 
     def _process_items(self) -> bool:
-        # 查询需要处理的workflowruntimeitems记录
-        sql_select = f"SELECT Id FROM workflowruntimeitems WHERE Deleted=1 AND CreatedAt<DATE_ADD(CURDATE(), INTERVAL -30 DAY) ORDER BY Id LIMIT {self.batch_size};"
+        # 查询区间内工单关联的workflowruntimeitems记录
+        sql_select = """
+            SELECT i.Id
+            FROM workflowruntimeitems i
+            JOIN tb_workorderinfo w ON i.TargetEntityId = w.Id
+            WHERE w.ServiceProviderCode <> '1002'
+              AND w.CreatedAt >= %s
+              AND w.CreatedAt < %s
+            ORDER BY i.Id
+            LIMIT %s
+        """
         processing_finished = True
         item_ids = []
-        
-        # 处理workflowruntimeitems表数据
+
         with self._get_connection() as conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute(sql_select)
+                    cur.execute(sql_select, (self.start_date, self.end_date, self.batch_size))
                     rows = cur.fetchall()
                     if not rows:
-                        logger.info("今日没有更多workflowruntimeitems记录需要删除")
+                        logger.info(f"区间[{self.start_date}, {self.end_date})内没有更多workflowruntimeitems记录需要删除")
                     else:
                         # 有记录需要处理，标记为未完成
                         processing_finished = False
                         # 收集所有item_id
                         item_ids = [row["Id"] for row in rows]
-                        
+
                         # 批量处理steps和actors
                         self._process_steps(item_ids)
 
@@ -83,21 +97,20 @@ class DeleteWorkflowHandler(BaseHandler):
                         time.sleep(30)
             except Exception as e:
                 conn.rollback()
-                logger.error(f"处理workflowruntimeitems表数据时发生错误: {e}, 处理数据：{placeholders_ids}")
-                raise   
+                logger.error(f"处理workflowruntimeitems表数据时发生错误: {e}, 处理数据：{item_ids}")
+                raise
         return processing_finished
-
 
     def _process_steps(self, item_ids) -> None:
         # 如果没有item_ids，则直接返回
         if not item_ids:
             logger.info("没有workflowruntimeitems记录需要处理")
             return
-            
+
         # 使用IN查询批量获取所有相关的steps
         placeholders_items = ",".join(["%s"] * len(item_ids))
         sql_select_steps = f"SELECT Id FROM workflowruntimesteps WHERE RuntimeItemId IN ({placeholders_items});"
-        
+
         step_ids = []
         with self._get_connection() as conn:
             try:
@@ -119,23 +132,22 @@ class DeleteWorkflowHandler(BaseHandler):
                     deleted_count_steps = cur.execute(sql_delete_steps, item_ids)
                     cur.execute("SET FOREIGN_KEY_CHECKS = 1;")
                     conn.commit()
-                    logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")          
+                    logger.info(f"已从workflowruntimesteps删除{deleted_count_steps}条记录")
             except Exception as e:
                 conn.rollback()
                 logger.error(f"处理workflowruntimesteps表数据时发生错误: {e}, 处理数据：{step_ids}")
-                raise 
-
+                raise
 
     def _process_actors(self, step_ids) -> None:
         # 如果没有step_ids，则直接返回
         if not step_ids:
             logger.info("没有workflowruntimesteps记录需要处理")
             return
-            
+
         # 使用IN查询批量删除所有相关的actors
         placeholders_steps = ",".join(["%s"] * len(step_ids))
         delete_actors = f"DELETE FROM workflowruntimeactors WHERE RuntimeStepId IN ({placeholders_steps});"
-        
+
         with self._get_connection() as conn:
             try:
                 with conn.cursor() as cur:
