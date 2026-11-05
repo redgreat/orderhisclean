@@ -17,7 +17,9 @@ class ConfigLoader:
             config_path: 配置文件路径，如果为None则使用默认路径
         """
         if config_path is None:
-            # 默认配置文件路径
+            # 环境变量 CONFIG_PATH 优先；否则用默认配置文件路径
+            config_path = os.environ.get("CONFIG_PATH")
+        if not config_path:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.dirname(current_dir)
             config_path = os.path.join(project_root, "conf", "config.yml")
@@ -58,12 +60,23 @@ class ConfigLoader:
         """获取数据库配置
         
         Args:
-            db_type: 数据库类型，默认为'main'
+            db_type: 数据库标签名（如 serviceordercenter / serviceordercenterhis / servicecenter_afc）
             
         Returns:
             Dict[str, Any]: 数据库配置
         """
         return self.config.get('database', {}).get(db_type, {})
+
+    def get_mysql_conf(self, db_name: str) -> Dict[str, Any]:
+        """按数据库标签名获取 pymysql 连接参数
+        
+        Args:
+            db_name: database 节点下的库标签名
+            
+        Returns:
+            dict: pymysql 连接参数；标签未配置时返回空字典
+        """
+        return self._get_mysql_conn_kwargs(self.get_db_config(db_name))
     
     def get_handler_config(self, handler_name: str) -> Dict[str, Any]:
         """获取处理器配置
@@ -204,9 +217,15 @@ def setup_logger(config_instance):
 # 创建全局配置实例
 config = ConfigLoader()
 
-# 导出数据库连接配置，便于其他模块直接使用
+# 导出数据库连接配置，便于其他模块直接使用（旧配置兼容：database.source / database.target）
 SOURCE_MYSQL_CONF = config.source_mysql_conf
 TARGET_MYSQL_CONF = config.target_mysql_conf
+
+# 日志目录绝对路径，供调度器为各处理器创建独立日志文件
+LOG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    config.get_logging_config().get('dir', 'log')
+)
 
 # 初始化日志配置
 setup_logger(config)

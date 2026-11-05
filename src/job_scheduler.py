@@ -14,7 +14,7 @@ import time
 import os
 import sys
 import argparse
-import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import schedule
 from loguru import logger
@@ -30,7 +30,7 @@ for path in [current_dir, parent_dir]:
         sys.path.append(path)
 
 # 导入配置和数据库配置（包含日志配置，会自动初始化日志）
-from config import config, SOURCE_MYSQL_CONF, TARGET_MYSQL_CONF
+from config import config, LOG_DIR
 # 导入基础处理器
 from base_handler import BaseHandler
 
@@ -63,68 +63,88 @@ def _discover_handlers() -> list[type[BaseHandler]]:
     return handlers
 
 
-def _run_handlers() -> None:
-    """Instantiate and run all handlers in order."""
-    logger.info("Daily job started… discovering handlers")
-    for handler_cls in _discover_handlers():
-        handler_name = handler_cls.__name__.lower()
-        logger.info(f"Running handler {handler_cls.__name__}")
-        try:
-            # 获取处理器特定配置
-            handler_config = config.get_handler_config(handler_name)
-            
-            # 获取截止时间（所有处理器通用）
-            cut_off_time_str = handler_config.get('cut_off_time', '23:00:00')
-            cut_off_time = config.parse_time(cut_off_time_str)
-            
-            if not handler_config.get('enabled', True):
-                logger.info(f"{handler_cls.__name__} 已在配置中禁用，跳过")
-                continue
+_HANDLER_SINKS: set = set()
 
-            if handler_cls.__name__ == "DeleteResourceHandler" or handler_cls.__name__ == "DeleteActorsHandler":
-                handler = handler_cls(
-                    connection_kwargs=SOURCE_MYSQL_CONF,
-                    batch_size=handler_config.get('batch_size', 100),
-                    cut_off_time=cut_off_time
-                )
-            elif handler_cls.__name__ == "DeleteWorkflowHandler":
-                start_date_str = handler_config.get('start_date')
-                end_date_str = handler_config.get('end_date')
-                start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d') if start_date_str else None
-                end_date = datetime.datetime.strptime(end_date_str, '%Y-%m-%d') if end_date_str else None
-                handler = handler_cls(
-                    connection_kwargs=SOURCE_MYSQL_CONF,
-                    start_date=start_date,
-                    end_date=end_date,
-                    batch_size=handler_config.get('batch_size', 100),
-                    cut_off_time=cut_off_time
-                )
-            elif handler_cls.__name__ == "WorkflowCompleteMigrationHandler":
-                handler = handler_cls(
-                    connection_kwargs=SOURCE_MYSQL_CONF,
-                    years=handler_config.get('years', []),
-                    batch_size=handler_config.get('batch_size', 50),
-                    pause_seconds=handler_config.get('pause_seconds', 30),
-                    workers=handler_config.get('workers', 1),
-                    cut_off_time=cut_off_time
-                )
-            # elif handler_cls.__name__ == "MigrationHandler":
-            #     handler = handler_cls(
-            #         source_conn_kwargs=SOURCE_MYSQL_CONF,
-            #         target_conn_kwargs=TARGET_MYSQL_CONF,
-            #         source_table=handler_config.get('source_table', 'source_table'),
-            #         target_table=handler_config.get('target_table', 'target_table'),
-            #         where_clause=handler_config.get('where_clause', "status = 'COMPLETED'"),
-            #         batch_size=handler_config.get('batch_size', 3000),
-            #         cut_off_time=cut_off_time
-            #     )
-            # else:
-            #     # 对于其他处理器类型，可以根据需要添加特定的实例化逻辑
-            #     handler = handler_cls()
-                
-            handler.run()
+
+def _add_handler_log_sink(cls_name: str, key: str) -> None:
+    """为处理器添加独立日志文件（幂等），通过 extra.handler 路由记录"""
+    if cls_name in _HANDLER_SINKS:
+        return
+    _HANDLER_SINKS.add(cls_name)
+    log_config = config.get_logging_config()
+    logger.add(
+        os.path.join(LOG_DIR, f"{key}.log"),
+        level=log_config.get('level', 'INFO'),
+        format=log_config.get('format', "{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}"),
+        rotation=log_config.get('rotation', "1 days"),
+        retention=log_config.get('retention', "7 days"),
+        compression="zip",
+        enqueue=True,
+        filter=lambda record, name=cls_name: record["extra"].get("handler") == name,
+    )
+
+
+def _build_handler(handler_cls: type[BaseHandler]) -> BaseHandler | None:
+    """校验配置并实例化处理器；不满足运行条件返回 None，绝不强行执行"""
+    key = handler_cls.__name__.lower()
+    handler_config = config.get_handler_config(key)
+
+    # enabled 必须显式配置为 true 才执行，默认禁用
+    if not handler_config.get('enabled', False):
+        logger.info(f"{handler_cls.__name__} 未配置 enabled: true，跳过（默认禁用）")
+        return None
+
+    # 每个处理器必须显式声明数据库标签（his库/正式库/_afc库），避免误连错误库
+    db_name = handler_config.get('database')
+    if not db_name:
+        logger.error(f"{handler_cls.__name__} 未配置 database 数据库标签，已跳过")
+        return None
+
+    db_conf = config.get_mysql_conf(db_name)
+    if not db_conf.get('database') or not db_conf.get('host'):
+        logger.error(f"{handler_cls.__name__} 的数据库标签 '{db_name}' 未在 database 节点中定义（缺 host/database），已跳过")
+        return None
+
+    _add_handler_log_sink(handler_cls.__name__, key)
+    logger.info(f"{handler_cls.__name__} 使用数据库标签 '{db_name}' -> {db_conf['database']}@{db_conf.get('host')}")
+
+    cut_off_time = config.parse_time(handler_config.get('cut_off_time', '23:00:00'))
+    # 复制配置并注入数据库标签名，供处理器写日志表时标注来源库
+    cfg = dict(handler_config)
+    cfg['_db_tag'] = db_name
+    return handler_cls(
+        connection_kwargs=db_conf,
+        config=cfg,
+        cut_off_time=cut_off_time,
+        db_resolver=config.get_mysql_conf,
+    )
+
+
+def _run_handlers() -> None:
+    """实例化并并发执行所有已启用的处理器。"""
+    logger.info("Daily job started… discovering handlers")
+    handlers: list = []
+    for handler_cls in _discover_handlers():
+        try:
+            handler = _build_handler(handler_cls)
+            if handler is not None:
+                handlers.append(handler)
         except Exception:
-            logger.exception(f"Handler {handler_cls.__name__} failed")
+            logger.exception(f"Handler {handler_cls.__name__} 初始化失败")
+
+    if not handlers:
+        logger.info("没有启用的处理器，本次任务结束")
+        return
+
+    # 各处理器并发执行，互不影响
+    with ThreadPoolExecutor(max_workers=len(handlers)) as pool:
+        futures = {pool.submit(h.run): h.__class__.__name__ for h in handlers}
+        for future in futures:
+            name = futures[future]
+            try:
+                future.result()
+            except Exception:
+                logger.exception(f"Handler {name} failed")
 
 
 def main() -> None:

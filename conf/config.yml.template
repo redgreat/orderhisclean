@@ -4,74 +4,125 @@ scheduler:
   start_time: "01:00"
   # 处理器模块列表 (不需要添加src.前缀，程序会自动处理)
   handler_modules:
-    - "delete_resource_handler"
-    - "delete_workflow_handler"
-    - "migration_handler"
-    - "workflow_complete_migration_handler"
+    - "delete_resource"
+    - "delete_workflow"
+    - "delete_actors"
+    - "migrate_workflow"
+    - "split_workflow"
+    - "split_resource"
+    # - "migration"
 
-# 数据库连接配置
+# 数据库连接配置（可配置多个库，用标签名区分；每个处理器必须显式指定一个标签）
 database:
-  # 源数据库配置
-  source:
+  # 正式库
+  serviceordercenter:
     host: "127.0.0.1"
     port: 3306
-    database: "source_db"  # 可用逗号分隔多个数据库
-    tables: "order_history,other_table"  # 可用逗号分隔多个表
+    database: "serviceordercenter"
     user: "root"
     password: "password"
     charset: "utf8"
-  
-  # 目标数据库配置
-  target:
+
+  # his 历史库
+  serviceordercenterhis:
     host: "127.0.0.1"
     port: 3306
-    database: "target_db"
+    database: "serviceordercenterhis"
+    user: "root"
+    password: "password"
+    charset: "utf8"
+
+  # afc 库
+  servicecenter_afc:
+    host: "127.0.0.1"
+    port: 3306
+    database: "servicecenter_afc"
     user: "root"
     password: "password"
     charset: "utf8"
 
 # 处理器配置
+# 通用字段（所有处理器都支持）：
+#   enabled:   必须显式为 true 才执行，缺省或 false 一律跳过
+#   database:  必填，database 节点下的库标签名，不配置或标签不存在则跳过
+#   cut_off_time: 每天截止时间，格式 HH:MM:SS
 handlers:
-  # 删除处理器配置
-  delete_resource_handler:
-    table: "order_history"
-    where_clause: "created_at < DATE_SUB(NOW(), INTERVAL 180 DAY)"
-    batch_size: 5000
-    cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
-  
-  # 工作流删除处理器配置
-  # 按 tb_workorderinfo.CreatedAt 区间 [start_date, end_date) 删除关联的 workflowruntime* 数据
-  # 仅处理 tb_workorderinfo.ServiceProviderCode <> '1002' 的工单
-  delete_workflow_handler:
-    start_date: "2022-01-01"  # 区间起始日期（含），格式: YYYY-MM-DD
-    end_date: "2023-01-01"    # 区间结束日期（不含），格式: YYYY-MM-DD
+  # 资源删除处理器
+  deleteresourcehandler:
+    enabled: false
+    database: serviceordercenter
     batch_size: 100
-    cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
+    cut_off_time: "23:00:00"
 
-  # 数据迁移处理器配置
-  migration_handler:
-    source_table: "source_table_name"
-    target_table: "target_table_name"
-    where_clause: "status = 'COMPLETED' AND created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)"
-    batch_size: 3000
-    cut_off_time: "22:30:00"  # 每天截止时间，格式: HH:MM:SS
+  # 工作流删除处理器
+  # 删除 workflowruntimeitems.Deleted=1 且创建超过30天的工单工作流数据（级联删除子表）
+  deleteworkflowhandler:
+    enabled: false
+    database: serviceordercenter
+    batch_size: 100
+    pause_seconds: 30  # 每批之间等待秒数，减轻数据库负载
+    cut_off_time: "23:00:00"
 
-  # 工作流运行时数据按年迁移到完成时表 (源库需为 serviceordercenter)
+  # 残留 actors 清理处理器
+  deleteactorshandler:
+    enabled: false
+    database: serviceordercenter
+    batch_size: 100
+    pause_seconds: 30
+    cut_off_time: "23:00:00"
+
+  # 工作流运行时数据按年迁移到完成时表 (数据库标签需指向 serviceordercenter)
   # 按 tb_workorderinfo.CreatedAt 年份区间 [Y-01-01, Y+1-01-01) 筛选工单主单，
-  # 再迁移其 workflowruntime* 数据到 workflowcomplete*，每批同一事务内插入后删除运行时数据
-  workflowcompletemigrationhandler:
-    enabled: false  # 是否启用（false 则跳过，所有处理器都支持该开关）
+  # 每批同一事务内：删除完成时已有记录 -> 插入完成时表 -> 删除运行时数据
+  migrateworkflowhandler:
+    enabled: false
+    database: serviceordercenter
     years: []  # 需要迁移的年份列表（按顺序执行），例如: [2022, 2023]；为空则不执行
     batch_size: 50  # 每批工单项数量（性能打满时可调大）
     pause_seconds: 30  # 每批之间等待秒数（后台常驻时可调大）
     workers: 1  # 并发线程数，按 Id 哈希分片互不冲突（性能打满时调大，后台常驻建议 1）
-    cut_off_time: "23:00:00"  # 每天截止时间，格式: HH:MM:SS
+    cut_off_time: "23:00:00"
+
+  # 工作流数据双库拆分处理器
+  # afc 库（database）删 ServiceProviderCode<>1002 含 NULL 的工单工作流数据
+  # 主库（database_main）删 ServiceProviderCode=1002 的工单工作流数据
+  splitworkflowhandler:
+    enabled: false
+    database: servicecenter_afc
+    database_main: serviceordercenter
+    # 可选：只删指定创建时间区间的工单；不配置则全量
+    # start_date: "2022-01-01"
+    # end_date: "2023-01-01"
+    batch_size: 100
+    pause_seconds: 30
+    cut_off_time: "23:00:00"
+
+  # 资源数据双库拆分处理器（tb_workresourceinfo + basic_resourceitem）
+  splitresourcehandler:
+    enabled: false
+    database: servicecenter_afc
+    database_main: serviceordercenter
+    # start_date: "2022-01-01"
+    # end_date: "2023-01-01"
+    batch_size: 100
+    pause_seconds: 30
+    cut_off_time: "23:00:00"
+
+  # 通用迁移处理器（示例，默认禁用）
+  migrationhandler:
+    enabled: false
+    database: serviceordercenter
+    source_table: "source_table_name"
+    target_table: "target_table_name"
+    where_clause: "status = 'COMPLETED' AND created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)"
+    batch_size: 3000
+    cut_off_time: "22:30:00"
 
 # 日志配置
 logging:
-  # 日志目录（相对于项目根目录）
+  # 日志目录（相对于项目根目录，容器内 /app/log，已挂载到宿主机 ./log）
   dir: "log"
-  # 日志文件名
+  # 主日志文件名（各处理器另有独立的 <处理器名>.log）
   filename: "batch_jobs.log"
   # 日志级别
   level: "INFO"
