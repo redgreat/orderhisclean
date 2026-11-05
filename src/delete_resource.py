@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import time
 
 from base_handler import BaseHandler
 from dbutil import connect, ph, write_job_log
@@ -29,6 +30,7 @@ class DeleteResourceHandler(BaseHandler):
         self.conn_kwargs = connection_kwargs
         self.db_tag = config.get('_db_tag')
         self.batch_size = config.get('batch_size', 100)
+        self.pause_seconds = config.get('pause_seconds', 30)
 
     # --------------------------------------------------------
     # Implementation
@@ -65,4 +67,8 @@ class DeleteResourceHandler(BaseHandler):
             self.log.info(f"已从tb_workresourceinfo删除{deleted_count_workinfo}条记录")
             if resource_ids:
                 self.log.info(f"已从basic_resourceitem删除{deleted_count_resource}条记录")
+
+        if self.pause_seconds:
+            self.log.info(f"批处理完成，等待{self.pause_seconds}秒开始下一批...")
+            time.sleep(self.pause_seconds)
         return False
