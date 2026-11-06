@@ -36,7 +36,7 @@ SQL_SELECT_ITEMS = """
     WHERE i.TargetEntityId IN (
             SELECT w.Id FROM tb_workorderinfo w
             WHERE w.CreatedAt >= %s AND w.CreatedAt < %s
-              AND w.OrderStatus=9)
+              AND w.WorkStatus=9)
       AND NOT EXISTS (SELECT 1 FROM workflowruntimereminderlogs r WHERE r.RuntimeItemId = i.Id)
       AND MOD(CRC32(i.Id), %s) = %s
     ORDER BY i.Id
