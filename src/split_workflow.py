@@ -8,11 +8,15 @@
         删除 ServiceProviderCode = '1002' 的工单关联的全部工作流数据
 
 每轮两个库各处理一批工单，各自单事务级联删除并写单号日志。
+workers>1 时按工单 Id 哈希分片并行，分片之间互不抢同一批数据。
 """
 from __future__ import annotations
 
 import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pymysql
 
 from base_handler import BaseHandler
 from dbutil import (
@@ -35,9 +39,13 @@ SQL_SELECT_WO = """
     WHERE {cond}{date_clause}
       AND (EXISTS (SELECT 1 FROM workflowruntimeitems i WHERE i.TargetEntityId = w.Id)
         OR EXISTS (SELECT 1 FROM workflowcompleteitems c WHERE c.TargetEntityId = w.Id))
+      AND MOD(CRC32(w.Id), %s) = %s
     ORDER BY w.Id
     LIMIT %s
 """
+
+DEADLOCK_ERRORS = (1213, 1205)  # Deadlock found / Lock wait timeout
+DEADLOCK_RETRIES = 3
 
 
 class SplitWorkflowHandler(BaseHandler):
@@ -47,12 +55,15 @@ class SplitWorkflowHandler(BaseHandler):
         config: dict,
         cut_off_time: datetime.time | None = None,
         db_resolver=None,
+        partition: int | None = None,
     ) -> None:
         if cut_off_time is None:
             cut_off_time = datetime.time(hour=23, minute=0, second=0)
         super().__init__(cut_off_time)
 
         config = config or {}
+        self._config = config
+        self._db_resolver = db_resolver
         # database 标签指向 afc 库（servicecenter_afc）
         self.conn_kwargs = connection_kwargs
         self.db_tag = config.get('_db_tag')
@@ -73,6 +84,8 @@ class SplitWorkflowHandler(BaseHandler):
         self.end_date = parse_date(config.get('end_date'))
         self.batch_size = config.get('batch_size', 100)
         self.pause_seconds = config.get('pause_seconds', 30)
+        self.workers = max(1, config.get('workers', 1))
+        self.partition = partition  # None: 主实例；0..workers-1: 并发子实例负责的哈希分片
 
         # 可选的工单创建时间区间，两库共用；不配置则全量
         self.date_clause = ""
@@ -84,14 +97,45 @@ class SplitWorkflowHandler(BaseHandler):
     # --------------------------------------------------------
     # Implementation
     # --------------------------------------------------------
+    def run(self) -> None:
+        """workers>1 时按工单 Id 哈希分片并行处理, 分片之间互不抢同一批数据"""
+        if self.partition is not None or self.workers == 1:
+            return super().run()
+        self.log.info(f"启动 {self.workers} 个并发分片")
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            futures = [pool.submit(self._clone(k).run) for k in range(self.workers)]
+            for future in futures:
+                future.result()
+
+    def _clone(self, partition: int) -> SplitWorkflowHandler:
+        return self.__class__(
+            connection_kwargs=self.conn_kwargs,
+            config=self._config,
+            cut_off_time=self.cut_off_time,
+            db_resolver=self._db_resolver,
+            partition=partition,
+        )
+
     def _process_once(self) -> bool:
         try:
-            done_afc = self._process_db(self.conn_kwargs, self.db_tag, COND_AFC, "afc")
-            done_main = self._process_db(self.main_kwargs, self.main_tag, COND_MAIN, "main")
+            done_afc = self._process_with_retry(self.conn_kwargs, self.db_tag, COND_AFC, "afc")
+            done_main = self._process_with_retry(self.main_kwargs, self.main_tag, COND_MAIN, "main")
             return done_afc and done_main
         except Exception as e:
             self.log.error(f"处理过程中发生错误: {e}")
             return True
+
+    def _process_with_retry(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
+        """并发删除时可能出现死锁/锁超时，自动重试"""
+        for attempt in range(1, DEADLOCK_RETRIES + 1):
+            try:
+                return self._process_db(conn_kwargs, db_tag, cond, label)
+            except pymysql.err.OperationalError as e:
+                if e.args[0] in DEADLOCK_ERRORS and attempt < DEADLOCK_RETRIES:
+                    self.log.warning(f"[{label}]死锁/锁超时，第{attempt}次重试: {e}")
+                    time.sleep(attempt)
+                    continue
+                raise
 
     def _process_db(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
         """处理一个库的一批工单；返回 True 表示该库已删完"""
@@ -102,7 +146,7 @@ class SplitWorkflowHandler(BaseHandler):
                     params.append(self.start_date)
                 if self.end_date:
                     params.append(self.end_date)
-                params.append(self.batch_size)
+                params += [self.workers, self.partition or 0, self.batch_size]
 
                 with conn.cursor() as cur:
                     cur.execute(SQL_SELECT_WO.format(cond=cond, date_clause=self.date_clause), params)

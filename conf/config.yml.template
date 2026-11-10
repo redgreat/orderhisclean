@@ -96,6 +96,7 @@ handlers:
     # end_date: "2023-01-01"
     batch_size: 100
     pause_seconds: 30
+    workers: 1  # 并发线程数，按工单 Id 哈希分片互不冲突（打满性能时调大）
     cut_off_time: "23:00:00"
 
   # 资源数据双库拆分处理器（tb_workresourceinfo + basic_resourceitem）
@@ -107,6 +108,7 @@ handlers:
     # end_date: "2023-01-01"
     batch_size: 100
     pause_seconds: 30
+    workers: 1  # 并发线程数，按工单 Id 哈希分片互不冲突（打满性能时调大）
     cut_off_time: "23:00:00"
 
   # 通用迁移处理器（示例，默认禁用）
