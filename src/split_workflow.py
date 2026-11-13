@@ -9,6 +9,7 @@
 
 每轮两个库各处理一批工单，各自单事务级联删除并写单号日志。
 workers>1 时按工单 Id 哈希分片并行，分片之间互不抢同一批数据。
+每个库维护 last_id 水位线（按工单 Id 顺序推进），避免每批重扫已处理区间。
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ COND_MAIN = "w.ServiceProviderCode = '1002'"
 SQL_SELECT_WO = """
     SELECT w.Id
     FROM tb_workorderinfo w
-    WHERE {cond}{date_clause}
+    WHERE {cond}{date_clause}{id_clause}
       AND (EXISTS (SELECT 1 FROM workflowruntimeitems i WHERE i.TargetEntityId = w.Id)
         OR EXISTS (SELECT 1 FROM workflowcompleteitems c WHERE c.TargetEntityId = w.Id))
       AND MOD(CRC32(w.Id), %s) = %s
@@ -44,8 +45,9 @@ SQL_SELECT_WO = """
     LIMIT %s
 """
 
-DEADLOCK_ERRORS = (1213, 1205)  # Deadlock found / Lock wait timeout
-DEADLOCK_RETRIES = 3
+DEADLOCK_ERRORS = (1213, 1205)              # Deadlock found / Lock wait timeout
+CONNECTION_ERRORS = (2002, 2003, 2006, 2013)  # 连接失败/连接丢失，重建连接后重试
+MAX_RETRIES = 3
 
 
 class SplitWorkflowHandler(BaseHandler):
@@ -86,6 +88,8 @@ class SplitWorkflowHandler(BaseHandler):
         self.pause_seconds = config.get('pause_seconds', 30)
         self.workers = max(1, config.get('workers', 1))
         self.partition = partition  # None: 主实例；0..workers-1: 并发子实例负责的哈希分片
+        # 默认按工单项写日志行（item 量≈工单量）；log_rows: false 只按工单写一行
+        self.log_rows = config.get('log_rows', True)
 
         # 可选的工单创建时间区间，两库共用；不配置则全量
         self.date_clause = ""
@@ -94,18 +98,25 @@ class SplitWorkflowHandler(BaseHandler):
         if self.end_date:
             self.date_clause += " AND w.CreatedAt < %s"
 
+        self._conns = {}     # label -> 长连接，避免每批重新建连
+        self._last_id = {}   # label -> 已处理的最大工单 Id（水位线）
+        self._done = set()   # 已处理完毕的 label
+
     # --------------------------------------------------------
     # Implementation
     # --------------------------------------------------------
     def run(self) -> None:
         """workers>1 时按工单 Id 哈希分片并行处理, 分片之间互不抢同一批数据"""
-        if self.partition is not None or self.workers == 1:
-            return super().run()
-        self.log.info(f"启动 {self.workers} 个并发分片")
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = [pool.submit(self._clone(k).run) for k in range(self.workers)]
-            for future in futures:
-                future.result()
+        try:
+            if self.partition is not None or self.workers == 1:
+                return super().run()
+            self.log.info(f"启动 {self.workers} 个并发分片")
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                futures = [pool.submit(self._clone(k).run) for k in range(self.workers)]
+                for future in futures:
+                    future.result()
+        finally:
+            self._close_conns()
 
     def _clone(self, partition: int) -> SplitWorkflowHandler:
         return self.__class__(
@@ -116,72 +127,116 @@ class SplitWorkflowHandler(BaseHandler):
             partition=partition,
         )
 
+    def _get_conn(self, label: str, conn_kwargs: dict):
+        """每个库复用一条长连接；断开时自动重连"""
+        conn = self._conns.get(label)
+        if conn is None:
+            conn = connect(conn_kwargs)
+            self._conns[label] = conn
+        else:
+            conn.ping(reconnect=True)
+        return conn
+
+    def _drop_conn(self, label: str) -> None:
+        conn = self._conns.pop(label, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _close_conns(self) -> None:
+        for label in list(self._conns):
+            self._drop_conn(label)
+
     def _process_once(self) -> bool:
         try:
-            done_afc = self._process_with_retry(self.conn_kwargs, self.db_tag, COND_AFC, "afc")
-            done_main = self._process_with_retry(self.main_kwargs, self.main_tag, COND_MAIN, "main")
-            return done_afc and done_main
+            if "afc" not in self._done and self._process_with_retry(
+                    self.conn_kwargs, self.db_tag, COND_AFC, "afc"):
+                self._done.add("afc")
+            if "main" not in self._done and self._process_with_retry(
+                    self.main_kwargs, self.main_tag, COND_MAIN, "main"):
+                self._done.add("main")
+            return len(self._done) == 2
         except Exception as e:
             self.log.error(f"处理过程中发生错误: {e}")
             return True
 
     def _process_with_retry(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
-        """并发删除时可能出现死锁/锁超时，自动重试"""
-        for attempt in range(1, DEADLOCK_RETRIES + 1):
+        """死锁/锁超时/连接丢失时自动重试；连接类错误先丢弃旧连接再重建"""
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return self._process_db(conn_kwargs, db_tag, cond, label)
             except pymysql.err.OperationalError as e:
-                if e.args[0] in DEADLOCK_ERRORS and attempt < DEADLOCK_RETRIES:
-                    self.log.warning(f"[{label}]死锁/锁超时，第{attempt}次重试: {e}")
+                if e.args[0] in CONNECTION_ERRORS:
+                    self._drop_conn(label)
+                if e.args[0] in DEADLOCK_ERRORS + CONNECTION_ERRORS and attempt < MAX_RETRIES:
+                    self.log.warning(f"[{label}]死锁/锁超时/连接异常，第{attempt}次重试: {e}")
                     time.sleep(attempt)
                     continue
                 raise
 
     def _process_db(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
         """处理一个库的一批工单；返回 True 表示该库已删完"""
-        with connect(conn_kwargs) as conn:
-            try:
-                params = []
-                if self.start_date:
-                    params.append(self.start_date)
-                if self.end_date:
-                    params.append(self.end_date)
-                params += [self.workers, self.partition or 0, self.batch_size]
+        conn = self._get_conn(label, conn_kwargs)
+        try:
+            # 水位线：只扫描还没处理过的工单区间，避免每批重扫已删前缀
+            last_id = self._last_id.get(label)
+            params = []
+            if self.start_date:
+                params.append(self.start_date)
+            if self.end_date:
+                params.append(self.end_date)
+            if last_id:
+                params.append(last_id)
+            params += [self.workers, self.partition or 0, self.batch_size]
 
-                with conn.cursor() as cur:
-                    cur.execute(SQL_SELECT_WO.format(cond=cond, date_clause=self.date_clause), params)
-                    wo_ids = [row["Id"] for row in cur.fetchall()]
+            with conn.cursor() as cur:
+                cur.execute(
+                    SQL_SELECT_WO.format(
+                        cond=cond,
+                        date_clause=self.date_clause,
+                        id_clause=" AND w.Id > %s" if last_id else "",
+                    ),
+                    params,
+                )
+                wo_ids = [row["Id"] for row in cur.fetchall()]
 
-                if not wo_ids:
-                    self.log.info(f"[{label}]没有更多需要删除的工单")
-                    return True
+            if not wo_ids:
+                self.log.info(f"[{label}]没有更多需要删除的工单")
+                return True
 
-                self.log.info(f"[{label}]本批删除 {len(wo_ids)} 个工单的工作流数据，工单主单: {sorted(wo_ids)}")
+            self.log.info(f"[{label}]本批删除 {len(wo_ids)} 个工单的工作流数据，工单主单: {sorted(wo_ids)}")
 
-                # 日志表检查要在写入之前做（其内部会 commit，不能放在删除事务中间）
-                job_log_ok = self._ensure_job_log(conn, label)
-                with conn.cursor() as cur:
-                    # 运行时侧
-                    runtime_rows = select_item_rows(cur, "workflowruntimeitems", wo_ids)
-                    counts = cascade_delete_workflow_items(
-                        cur, [r["Id"] for r in runtime_rows], prefix="workflowruntime")
-                    # 完成时侧
-                    complete_rows = select_item_rows(cur, "workflowcompleteitems", wo_ids)
-                    complete_counts = cascade_delete_workflow_items(
-                        cur, [r["Id"] for r in complete_rows], prefix="workflowcomplete")
-                    counts.update(complete_counts)
+            # 日志表检查要在写入之前做（其内部会 commit，不能放在删除事务中间）
+            job_log_ok = self._ensure_job_log(conn, label)
+            with conn.cursor() as cur:
+                # 运行时侧
+                runtime_rows = select_item_rows(cur, "workflowruntimeitems", wo_ids)
+                counts = cascade_delete_workflow_items(
+                    cur, [r["Id"] for r in runtime_rows], prefix="workflowruntime")
+                # 完成时侧
+                complete_rows = select_item_rows(cur, "workflowcompleteitems", wo_ids)
+                complete_counts = cascade_delete_workflow_items(
+                    cur, [r["Id"] for r in complete_rows], prefix="workflowcomplete")
+                counts.update(complete_counts)
 
-                    if job_log_ok:
+                if job_log_ok:
+                    if self.log_rows:
                         log_rows = [(r["TargetEntityId"], r["Id"]) for r in runtime_rows]
                         log_rows += [(r["TargetEntityId"], r["Id"]) for r in complete_rows]
-                        write_job_log(conn, self.__class__.__name__, "split_delete", db_tag, log_rows)
-                conn.commit()
-                self.log.info(f"[{label}]已删除 {len(wo_ids)} 个工单的工作流数据: {counts}")
+                    else:
+                        log_rows = [(w, None) for w in wo_ids]
+                    write_job_log(conn, self.__class__.__name__, "split_delete", db_tag, log_rows,
+                                  detail=None if self.log_rows else f"items={len(runtime_rows) + len(complete_rows)}")
+            conn.commit()
+            self._last_id[label] = wo_ids[-1]
+            self.log.info(f"[{label}]已删除 {len(wo_ids)} 个工单的工作流数据: {counts}")
 
-                if self.pause_seconds:
-                    time.sleep(self.pause_seconds)
-                return False
-            except Exception as e:
-                conn.rollback()
-                self.log.error(f"[{label}]删除工作流数据时发生错误，已回滚本批: {e}")
-                raise
+            if self.pause_seconds:
+                time.sleep(self.pause_seconds)
+            return False
+        except Exception as e:
+            conn.rollback()
+            self.log.error(f"[{label}]删除工作流数据时发生错误，已回滚本批: {e}")
+            raise

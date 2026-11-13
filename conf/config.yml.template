@@ -97,6 +97,7 @@ handlers:
     batch_size: 100
     pause_seconds: 30
     workers: 1  # 并发线程数，按工单 Id 哈希分片互不冲突（打满性能时调大）
+    log_rows: true  # true=按工单项写 job_clean_logs；false=按工单写一行(Detail 记 item 数)
     cut_off_time: "23:00:00"
 
   # 资源数据双库拆分处理器（tb_workresourceinfo + basic_resourceitem）
@@ -109,6 +110,7 @@ handlers:
     batch_size: 100
     pause_seconds: 30
     workers: 1  # 并发线程数，按工单 Id 哈希分片互不冲突（打满性能时调大）
+    log_rows: false  # true=按资源行写 job_clean_logs；false=按工单写一行(Detail 记行数)，量大时建议 false
     cut_off_time: "23:00:00"
 
   # 通用迁移处理器（示例，默认禁用）

@@ -8,6 +8,7 @@
 
 每轮两个库各处理一批工单，各自单事务删除并写单号日志。
 workers>1 时按工单 Id 哈希分片并行，分片之间互不抢同一批数据。
+每个库维护 last_id 水位线（按工单 Id 顺序推进），避免每批重扫已处理区间。
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ COND_MAIN = "w.ServiceProviderCode = '1002'"
 SQL_SELECT_WO = """
     SELECT w.Id
     FROM tb_workorderinfo w
-    WHERE {cond}{date_clause}
+    WHERE {cond}{date_clause}{id_clause}
       AND EXISTS (SELECT 1 FROM tb_workresourceinfo r WHERE r.WorkOrderId = w.Id)
       AND MOD(CRC32(w.Id), %s) = %s
     ORDER BY w.Id
@@ -42,8 +43,9 @@ SQL_SELECT_ROWS = """
     WHERE r.WorkOrderId IN ({ids})
 """
 
-DEADLOCK_ERRORS = (1213, 1205)  # Deadlock found / Lock wait timeout
-DEADLOCK_RETRIES = 3
+DEADLOCK_ERRORS = (1213, 1205)              # Deadlock found / Lock wait timeout
+CONNECTION_ERRORS = (2002, 2003, 2006, 2013)  # 连接失败/连接丢失，重建连接后重试
+MAX_RETRIES = 3
 
 
 class SplitResourceHandler(BaseHandler):
@@ -82,6 +84,8 @@ class SplitResourceHandler(BaseHandler):
         self.pause_seconds = config.get('pause_seconds', 30)
         self.workers = max(1, config.get('workers', 1))
         self.partition = partition  # None: 主实例；0..workers-1: 并发子实例负责的哈希分片
+        # 默认只按工单主单写日志行（Detail 记删除行数）；log_rows: true 恢复按资源行写
+        self.log_rows = config.get('log_rows', False)
 
         self.date_clause = ""
         if self.start_date:
@@ -89,18 +93,25 @@ class SplitResourceHandler(BaseHandler):
         if self.end_date:
             self.date_clause += " AND w.CreatedAt < %s"
 
+        self._conns = {}     # label -> 长连接，避免每批重新建连
+        self._last_id = {}   # label -> 已处理的最大工单 Id（水位线）
+        self._done = set()   # 已处理完毕的 label
+
     # --------------------------------------------------------
     # Implementation
     # --------------------------------------------------------
     def run(self) -> None:
         """workers>1 时按工单 Id 哈希分片并行处理, 分片之间互不抢同一批数据"""
-        if self.partition is not None or self.workers == 1:
-            return super().run()
-        self.log.info(f"启动 {self.workers} 个并发分片")
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = [pool.submit(self._clone(k).run) for k in range(self.workers)]
-            for future in futures:
-                future.result()
+        try:
+            if self.partition is not None or self.workers == 1:
+                return super().run()
+            self.log.info(f"启动 {self.workers} 个并发分片")
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                futures = [pool.submit(self._clone(k).run) for k in range(self.workers)]
+                for future in futures:
+                    future.result()
+        finally:
+            self._close_conns()
 
     def _clone(self, partition: int) -> SplitResourceHandler:
         return self.__class__(
@@ -111,69 +122,116 @@ class SplitResourceHandler(BaseHandler):
             partition=partition,
         )
 
+    def _get_conn(self, label: str, conn_kwargs: dict):
+        """每个库复用一条长连接；断开时自动重连"""
+        conn = self._conns.get(label)
+        if conn is None:
+            conn = connect(conn_kwargs)
+            with conn.cursor() as cur:
+                cur.execute("SET FOREIGN_KEY_CHECKS = 0;")
+            self._conns[label] = conn
+        else:
+            conn.ping(reconnect=True)
+        return conn
+
+    def _drop_conn(self, label: str) -> None:
+        conn = self._conns.pop(label, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _close_conns(self) -> None:
+        for label in list(self._conns):
+            self._drop_conn(label)
+
     def _process_once(self) -> bool:
         try:
-            done_afc = self._process_with_retry(self.conn_kwargs, self.db_tag, COND_AFC, "afc")
-            done_main = self._process_with_retry(self.main_kwargs, self.main_tag, COND_MAIN, "main")
-            return done_afc and done_main
+            if "afc" not in self._done and self._process_with_retry(
+                    self.conn_kwargs, self.db_tag, COND_AFC, "afc"):
+                self._done.add("afc")
+            if "main" not in self._done and self._process_with_retry(
+                    self.main_kwargs, self.main_tag, COND_MAIN, "main"):
+                self._done.add("main")
+            return len(self._done) == 2
         except Exception as e:
             self.log.error(f"处理过程中发生错误: {e}")
             return True
 
     def _process_with_retry(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
-        """并发删除时可能出现死锁/锁超时，自动重试"""
-        for attempt in range(1, DEADLOCK_RETRIES + 1):
+        """死锁/锁超时/连接丢失时自动重试；连接类错误先丢弃旧连接再重建"""
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return self._process_db(conn_kwargs, db_tag, cond, label)
             except pymysql.err.OperationalError as e:
-                if e.args[0] in DEADLOCK_ERRORS and attempt < DEADLOCK_RETRIES:
-                    self.log.warning(f"[{label}]死锁/锁超时，第{attempt}次重试: {e}")
+                if e.args[0] in CONNECTION_ERRORS:
+                    self._drop_conn(label)
+                if e.args[0] in DEADLOCK_ERRORS + CONNECTION_ERRORS and attempt < MAX_RETRIES:
+                    self.log.warning(f"[{label}]死锁/锁超时/连接异常，第{attempt}次重试: {e}")
                     time.sleep(attempt)
                     continue
                 raise
 
     def _process_db(self, conn_kwargs: dict, db_tag: str, cond: str, label: str) -> bool:
-        with connect(conn_kwargs) as conn:
-            try:
-                params = []
-                if self.start_date:
-                    params.append(self.start_date)
-                if self.end_date:
-                    params.append(self.end_date)
-                params += [self.workers, self.partition or 0, self.batch_size]
+        """处理一个库的一批工单；返回 True 表示该库已删完"""
+        conn = self._get_conn(label, conn_kwargs)
+        try:
+            # 水位线：只扫描还没处理过的工单区间，避免每批重扫已删前缀
+            last_id = self._last_id.get(label)
+            params = []
+            if self.start_date:
+                params.append(self.start_date)
+            if self.end_date:
+                params.append(self.end_date)
+            if last_id:
+                params.append(last_id)
+            params += [self.workers, self.partition or 0, self.batch_size]
 
-                with conn.cursor() as cur:
-                    cur.execute(SQL_SELECT_WO.format(cond=cond, date_clause=self.date_clause), params)
-                    wo_ids = [row["Id"] for row in cur.fetchall()]
+            with conn.cursor() as cur:
+                cur.execute(
+                    SQL_SELECT_WO.format(
+                        cond=cond,
+                        date_clause=self.date_clause,
+                        id_clause=" AND w.Id > %s" if last_id else "",
+                    ),
+                    params,
+                )
+                wo_ids = [row["Id"] for row in cur.fetchall()]
 
-                if not wo_ids:
-                    self.log.info(f"[{label}]没有更多需要删除的工单")
-                    return True
+            if not wo_ids:
+                self.log.info(f"[{label}]没有更多需要删除的工单")
+                return True
 
-                with conn.cursor() as cur:
-                    cur.execute(SQL_SELECT_ROWS.format(ids=ph(wo_ids)), wo_ids)
-                    rows = cur.fetchall()
+            with conn.cursor() as cur:
+                cur.execute(SQL_SELECT_ROWS.format(ids=ph(wo_ids)), wo_ids)
+                rows = cur.fetchall()
 
-                ids = [row["Id"] for row in rows]
-                resource_ids = [row["ResourceId"] for row in rows if row["ResourceId"]]
-                self.log.info(f"[{label}]本批删除 {len(ids)} 条资源关联记录，关联工单主单: {sorted(wo_ids)}")
+            ids = [row["Id"] for row in rows]
+            resource_ids = [row["ResourceId"] for row in rows if row["ResourceId"]]
+            self.log.info(f"[{label}]本批删除 {len(ids)} 条资源关联记录，关联工单主单: {sorted(wo_ids)}")
 
-                job_log_ok = self._ensure_job_log(conn, label)
-                with conn.cursor() as cur:
-                    cur.execute("SET FOREIGN_KEY_CHECKS = 0;")
-                    deleted_workinfo = delete_in(cur, "tb_workresourceinfo", "Id", ids)
-                    deleted_resource = delete_in(cur, "basic_resourceitem", "Id", resource_ids)
-                    cur.execute("SET FOREIGN_KEY_CHECKS = 1;")
-                    if job_log_ok:
-                        write_job_log(conn, self.__class__.__name__, "split_delete", db_tag,
-                                      [(row["WorkOrderId"], row["Id"]) for row in rows])
-                conn.commit()
-                self.log.info(f"[{label}]已删除 tb_workresourceinfo {deleted_workinfo} 条、basic_resourceitem {deleted_resource} 条")
+            job_log_ok = self._ensure_job_log(conn, label)
+            with conn.cursor() as cur:
+                deleted_workinfo = delete_in(cur, "tb_workresourceinfo", "Id", ids)
+                deleted_resource = delete_in(cur, "basic_resourceitem", "Id", resource_ids)
+                if job_log_ok:
+                    if self.log_rows:
+                        log_rows = [(row["WorkOrderId"], row["Id"]) for row in rows]
+                        write_job_log(conn, self.__class__.__name__, "split_delete",
+                                      db_tag, log_rows)
+                    else:
+                        write_job_log(conn, self.__class__.__name__, "split_delete",
+                                      db_tag, [(w, None) for w in wo_ids],
+                                      detail=f"resource_rows={len(ids)}")
+            conn.commit()
+            self._last_id[label] = wo_ids[-1]
+            self.log.info(f"[{label}]已删除 tb_workresourceinfo {deleted_workinfo} 条、basic_resourceitem {deleted_resource} 条")
 
-                if self.pause_seconds:
-                    time.sleep(self.pause_seconds)
-                return False
-            except Exception as e:
-                conn.rollback()
-                self.log.error(f"[{label}]删除资源数据时发生错误，已回滚本批: {e}")
-                raise
+            if self.pause_seconds:
+                time.sleep(self.pause_seconds)
+            return False
+        except Exception as e:
+            conn.rollback()
+            self.log.error(f"[{label}]删除资源数据时发生错误，已回滚本批: {e}")
+            raise
